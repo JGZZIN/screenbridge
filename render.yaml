@@ -1,11 +1,14 @@
+
 services:
   - type: web
     name: screenbridge-signaling
     runtime: node
+    plan: free
     rootDir: server
     buildCommand: npm install
     startCommand: npm start
-    healthCheckPath: /health
+    healthCheckPath: /
     envVars:
       - key: NODE_ENV
         value: production
+
