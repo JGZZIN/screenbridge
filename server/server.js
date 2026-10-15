@@ -3,7 +3,6 @@
 
 const http = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
-const url = require('url');
 
 const PORT = Number(process.env.PORT || 8080);
 const MAX_PAYLOAD = 1024 * 1024;
@@ -28,27 +27,51 @@ const ALLOWED_TYPES = new Set([
   'error'
 ]);
 
+// Servidor HTTP: página inicial e verificação de saúde.
 const server = http.createServer((req, res) => {
-  if (req.url === '/' || req.url === '/health') {
+  const pathname = new URL(
+    req.url || '/',
+    'http://localhost'
+  ).pathname;
+
+  if (pathname === '/' || pathname === '/health') {
     res.writeHead(200, {
-      'content-type': 'text/plain; charset=utf-8'
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store'
     });
-    return res.end('ScreenBridge signaling server is running');
+
+    res.end('ScreenBridge signaling server is running');
+    return;
   }
 
   res.writeHead(404, {
     'content-type': 'text/plain; charset=utf-8'
   });
+
   res.end('Not found');
 });
 
+// WebSocket: usado para trocar mensagens entre os dispositivos.
 const wss = new WebSocketServer({
   noServer: true,
   maxPayload: MAX_PAYLOAD
 });
 
+// Aceita conexões WebSocket somente no caminho /ws.
 server.on('upgrade', (req, socket, head) => {
-  if (url.parse(req.url).pathname !== '/ws') {
+  let pathname;
+
+  try {
+    pathname = new URL(
+      req.url || '/',
+      'http://localhost'
+    ).pathname;
+  } catch {
+    socket.destroy();
+    return;
+  }
+
+  if (pathname !== '/ws') {
     socket.destroy();
     return;
   }
@@ -58,35 +81,41 @@ server.on('upgrade', (req, socket, head) => {
   });
 });
 
+// Envia JSON somente para conexões abertas.
 function sendJson(ws, message) {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(message));
   }
 }
 
+// Remove um dispositivo da sala quando desconecta
+// ou entra em outra sala.
 function removeFromRoom(ws) {
   if (!ws.room) return;
 
   const roomName = ws.room;
   const members = rooms.get(roomName);
 
-  members?.delete(ws);
+  if (members) {
+    members.delete(ws);
 
-  for (const peer of members || []) {
-    sendJson(peer, {
-      type: 'peer-left',
-      role: ws.role
-    });
-  }
+    for (const peer of members) {
+      sendJson(peer, {
+        type: 'peer-left',
+        role: ws.role
+      });
+    }
 
-  if (members?.size === 0) {
-    rooms.delete(roomName);
+    if (members.size === 0) {
+      rooms.delete(roomName);
+    }
   }
 
   ws.room = null;
   ws.role = null;
 }
 
+// Nova conexão WebSocket.
 wss.on('connection', ws => {
   ws.room = null;
   ws.role = null;
@@ -104,8 +133,11 @@ wss.on('connection', ws => {
       return;
     }
 
-    if (!msg || typeof msg.type !== 'string') return;
+    if (!msg || typeof msg.type !== 'string') {
+      return;
+    }
 
+    // Entrada em uma sala.
     if (msg.type === 'join') {
       const room = String(msg.room || '').trim();
       const role = String(msg.role || '');
@@ -126,6 +158,7 @@ wss.on('connection', ws => {
         return;
       }
 
+      // Evita manter a mesma conexão em duas salas.
       removeFromRoom(ws);
 
       ws.room = room;
@@ -145,6 +178,7 @@ wss.on('connection', ws => {
         peers: members.size - 1
       });
 
+      // Informa os participantes existentes sobre o novo dispositivo.
       for (const peer of members) {
         if (peer === ws) continue;
 
@@ -178,12 +212,13 @@ wss.on('connection', ws => {
       return;
     }
 
-    // Encaminha mensagens somente aos participantes da mesma sala.
-    // O Android ainda precisa validar as permissões antes de acessar
-    // câmera, tela, contatos, galeria ou arquivos.
+    // Encaminha mensagens somente aos outros participantes
+    // da mesma sala. Não executa comandos no dispositivo.
     const members = rooms.get(ws.room);
 
-    for (const peer of members || []) {
+    if (!members) return;
+
+    for (const peer of members) {
       if (peer !== ws) {
         sendJson(peer, msg);
       }
@@ -199,6 +234,13 @@ wss.on('connection', ws => {
   });
 });
 
+// Inicia o servidor na porta fornecida pelo Render.
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`ScreenBridge signaling listening on port ${PORT}`);
+  console.log(
+    `ScreenBridge signaling listening on port ${PORT}`
+  );
+});
+
+server.on('error', error => {
+  console.error('Erro no servidor HTTP:', error.message);
 });
